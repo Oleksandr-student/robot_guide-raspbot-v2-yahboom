@@ -1,0 +1,220 @@
+Гайд: Налаштування і Використання Робота
+1. Підготовка і Налаштування Робочого Середовища
+1.1 Встановлення Docker
+
+    Завантажте і встановіть Docker відповідно до інструкцій для вашої операційної системи:    
+./docker_ros2.sh
+ros2 launch yahboomcar_bringup bringup.launch.py
+docker ps
+docker exec -it <container_id> /bin/bash
+ros2 node list
+ros2 node info /driver_node
+
+Управління Роботом
+3.1 Запуск Ноди Управління
+
+    Запустіть ноду управління шасі:
+ros2 launch yahboomcar_bringup bringup.launch.py
+ros2 topic echo /ultrasonic
+pip install opencv-python SpeechRecognition
+pip install opencv-python SpeechRecognition
+
+Створення Файлів для Розпізнавання Об'єктів і Голосу
+
+    Створіть файл object_recognition.py:
+import cv2
+import numpy as np
+
+class ObjectRecognition:
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+
+    def detect_objects(self):
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            lower_red = np.array([0, 70, 50])
+            upper_red = np.array([10, 255, 255])
+            mask = cv2.inRange(hsv, lower_red, upper_red)
+            result = cv2.bitwise_and(frame, frame, mask=mask)
+            cv2.imshow("Frame", result)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+Створіть файл voice_commands.py:
+import speech_recognition as sr
+
+class VoiceCommands:
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+
+    def listen_for_commands(self):
+        with sr.Microphone() as source:
+            print("Listening for commands...")
+            audio = self.recognizer.listen(source)
+            try:
+                command = self.recognizer.recognize_google(audio)
+                print(f"Command received: {command}")
+                return command
+            except sr.UnknownValueError:
+                print("Could not understand audio")
+                return ""
+            except sr.RequestError as e:
+                print(f"Could not request results; {e}")
+                return ""
+
+Оновлення Файлу voice_control_node.py
+
+    Редагуйте файл voice_control_node.py:
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Range
+from .Speech_Lib import Speech
+from .Rosmaster_Lib import Rosmaster
+from .object_recognition import ObjectRecognition
+from .voice_commands import VoiceCommands
+
+class VoiceControlNode(Node):
+    def __init__(self):
+        super().__init__('voice_control_node')
+        self.spe = Speech()
+        self.car = Rosmaster()
+        self.object_recognition = ObjectRecognition()
+        self.voice_commands = VoiceCommands()
+        self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.ultrasonic_subscriber = self.create_subscription(Range, '/ultrasonic_sensor', self.ultrasonic_callback, 10)
+        self.timer = self.create_timer(0.1, self.check_voice_command)
+        self.get_logger().info('VoiceControlNode has been started.')
+        self.obstacle_detected = False
+
+    def ultrasonic_callback(self, msg):
+        self.get_logger().info(f"Received ultrasonic data: {msg.range}")
+        if msg.range < 0.2:
+            self.obstacle_detected = True
+        else:
+            self.obstacle_detected = False
+        self.get_logger().info(f'Obstacle detected: {self.obstacle_detected}, Distance: {msg.range}')
+
+    def check_voice_command(self):
+        self.get_logger().info("Checking for voice commands...")
+        speech_r = self.spe.speech_read()
+        if speech_r:
+            self.get_logger().info(f"Voice command received: {speech_r}")
+            self.process_command(speech_r)
+        else:
+            self.get_logger().info("No voice command received.")
+
+    def process_command(self, command):
+        msg = Twist()
+        if self.obstacle_detected:
+            self.spe.void_write('Whoa! Something’s in my way!')
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            self.publisher_.publish(msg)
+            return
+
+        if command == '$B001#' or command == '$B002#':  # Зупинка
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            self.spe.void_write('stop')
+            self.car.set_car_motion(0, 0, 0)
+        elif command == '$B004#':  # Вперед
+            msg.linear.x = 0.2
+            msg.angular.z = 0.0
+            self.spe.void_write('go ahead')
+            self.car.set_car_motion(0.2, 0, 0)
+        elif command == '$B005#':  # Назад
+            msg.linear.x = -0.2
+            msg.angular.z = 0.0
+            self.spe.void_write('back')
+            self.car.set_car_motion(-0.2, 0, 0)
+        elif command == '$B006#':  # Поворот вліво
+            msg.linear.x = 0.0
+            msg.angular.z = 0.2
+            self.spe.void_write('turn left')
+            self.car.set_car_motion(0, 0.1, 0)
+        elif command == '$B007#':  # Поворот вправо
+            msg.linear.x = 0.0
+            msg.angular.z = -0.2
+            self.spe.void_write('turn right')
+            self.car.set_car_motion(0, -0.1, 0)
+        elif command == '$B010#':  # Закрити світло
+            self.spe.void_write('close light')
+            self.car.Ctrl_WQ2812_ALL(0, 7)
+        elif command == '$B011#':  # Включити червоне світло
+            self.spe.void_write('red light up')
+            self.car.Ctrl_WQ2812_ALL(1, 0)
+        elif command == '$B012#':  # Включити зелене світло
+            self.spe.void_write('green light up')
+            self.car.Ctrl_WQ2812_ALL(1, 1)
+        elif command == '$B013#':  # Включити синє світло
+            self.spe.void_write('blue light up')
+            self.car.Ctrl_WQ2812_ALL(1, 2)
+        elif command == '$B014#':  # Включити жовте світло
+            self.spe.void_write('yellow light up')
+            self.car.Ctrl_WQ2812_ALL(1, 3)
+        elif command == '$B015#':  # Включити світло A (річковий ефект)
+            self.spe.void_write('light A')
+            self.car.execute_effect('river', 5, 1, 0)
+        elif command == '$B016#':  # Включити світло B (градієнтний ефект)
+            self.spe.void_write('light B')
+            self.car               self.car.execute_effect('gradient', 5, 1, 0)
+           elif command == '$B017#':  # Включити світло C (ефект дихання)
+               self.spe.void_write('light C')
+               self.car.execute_effect('breathing', 5, 1, 0)
+           self.publisher_.publish(msg)
+
+   def main(args=None):
+       rclpy.init(args=args)
+       node = VoiceControlNode()
+       rclpy.spin(node)
+       node.destroy_node()
+       rclpy.shutdown()
+
+   if __name__ == '__main__':
+       main()
+
+Перекомпіляція проекту та запуск вузла
+
+    Перекомпіляція проекту:
+
+cd /root/yahboomcar_ws
+colcon build --packages-select yahboomcar_voice_ctrl
+
+source /opt/ros/humble/setup.bash
+source /root/yahboomcar_ws/install/setup.bash
+ros2 run yahboomcar_voice_ctrl voice_control_node
+
+Тестування
+
+    Скажіть "Hi Yahboom" для активації модуля.
+
+    Вимовте команди "stop", "go ahead", "back", "turn left", "turn right", "close light", "red light up", "green light up", "blue light up", "yellow light up", "light A", "light B", "light C" і переконайтеся, що у консолі з'являються правильні повідомлення, робот відповідає відповідним чином і демонструє світлові ефекти.
+
+6. Діагностика та вирішення проблем
+
+Якщо деякі функції не працюють, виконайте наступні кроки для діагностики:
+
+    Перевірте лог файли:
+
+        Перевірте, чи є якісь помилки або попередження у вихідних даних:
+
+ros2 run yahboomcar_voice_ctrl voice_control_node
+
+Перевірка підключення сенсорів і актуаторів:
+
+    Переконайтеся, що всі сенсори та актуатори підключені правильно.
+
+Перевірка голосових команд:
+
+    Переконайтеся, що мікрофон працює правильно і розпізнавання голосу налаштоване коректно.
+
+Перевірка коду:
+
+    Переконайтеся, що всі імпортовані модулі доступні та налаштовані правильно.
+
